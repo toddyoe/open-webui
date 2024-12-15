@@ -1,5 +1,88 @@
 #!/usr/bin/env bash
 
+set -e  
+
+# Check required environment variables
+if [ -z "$GITHUB_USERNAME" ] || [ -z "$GITHUB_REPO" ] || [ -z "$GITHUB_TOKEN" ]; then  
+    echo "Missing required environment variables GITHUB_USERNAME or GITHUB_REPO or GITHUB_TOKEN"  
+    exit 1  
+fi  
+
+# Build GitHub repository clone URL with token
+REPO_URL="https://${GITHUB_TOKEN}@github.com/${GITHUB_USERNAME}/${GITHUB_REPO}.git"  
+
+# Check and create directories
+mkdir -p ./data ./github_data
+
+# Clone repository
+echo "Cloning repository..."  
+git clone "$REPO_URL" ./github_data || {  
+    echo "Clone failed, please check if GITHUB_USERNAME, GITHUB_REPO and GITHUB_TOKEN are correct."  
+    exit 1  
+}  
+
+if [ -f ./github_data/webui.db ]; then
+    mv ./github_data/webui.db ./data/webui.db
+    echo "Successfully pulled from GitHub repository"
+else
+    echo "webui.db not found in GitHub repository, will push during sync"
+fi
+
+# Define sync function
+sync_to_github() {  
+    while true; do  
+        # Enter repository directory
+        cd ./github_data  
+
+        # Configure Git user information
+        git config user.name "AutoSync Bot"  
+        git config user.email "autosync@bot.com"  
+
+        # Ensure on correct branch
+        git checkout main || git checkout master  
+
+        # Copy latest database file
+        if [ -f ../data/webui.db ]; then
+          cp ../data/webui.db ./webui.db
+        else
+          echo "Local file ../data/webui.db not exists."
+        fi
+
+        # Check for changes
+        if [[ -n $(git status -s) ]]; then  
+            # Add all changes
+            git add webui.db  
+            
+            # Commit changes
+            git commit -m "Auto sync webui.db $(date '+%Y-%m-%d %H:%M:%S')"  
+            
+            # Push to remote repository
+            git push origin HEAD || {  
+                echo "Push failed, waiting to retry..."  
+                sleep 10  
+                git push origin HEAD  || {  
+                    echo "Retry failed, abandoning push."    
+                }
+            }  
+            
+            echo "Database synced to GitHub"  
+        else  
+            echo "No database changes detected"  
+        fi  
+
+        # Return to parent directory
+        cd ..  
+
+        # Get wait time from environment variable, default is 7200 seconds
+        SYNC_INTERVAL=${SYNC_INTERVAL:-7200}
+        echo "Waiting ${SYNC_INTERVAL} seconds before next sync..."
+        sleep $SYNC_INTERVAL
+    done  
+}  
+
+# Start sync process in background
+sync_to_github &
+
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 cd "$SCRIPT_DIR" || exit
 
