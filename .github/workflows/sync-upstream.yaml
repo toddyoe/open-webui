@@ -1,0 +1,141 @@
+name: Upstream Sync
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: "30 07,15,23 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync-latest-from-upstream:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.repository.fork }}
+    outputs:
+      successed: ${{ steps.git_rebase.outputs.successed }}
+    steps:
+      - name: Output date
+        id: timestamp
+        run: |
+          echo "Current date: `date`"
+
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: sync
+
+      - name: Sync upstream changes
+        id: sync_code
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
+        with:
+          upstream_sync_repo: open-webui/open-webui
+          upstream_sync_branch: main
+          target_sync_branch: sync
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }} # automatically generated, no need to set
+
+          # Set test_mode true to run tests instead of the true action!!
+          test_mode: false
+
+      - name: Sync check
+        if: failure()
+        run: |
+          echo "[Error] 由于上游仓库的 workflow 文件变更，导致 GitHub 自动暂停了本次自动更新，你需要手动 Sync Fork 一次"
+          echo "[Error] Due to a change in the workflow file of the upstream repository, GitHub has automatically suspended the scheduled automatic update. You need to manually sync your fork."
+          exit 1
+
+      - name: Git rebase
+        id: git_rebase
+        if: ${{ steps.sync_code.outputs.has_new_commits == 'true' }}
+        run: |
+          # checkout main branch
+          git checkout main || git checkout -b main origin/main
+
+          # config committer information
+          git config --local user.name "$(git log -n 1 --pretty=format:%cn sync)"
+          git config --local user.email "$(git log -n 1 --pretty=format:%ce sync)"
+
+          # rebase and push to remote
+          git rebase sync
+          git push origin main --force
+
+          # output
+          echo "successed=true" >> $GITHUB_OUTPUT
+
+      - name: No new commits
+        if: ${{ steps.sync_code.outputs.has_new_commits == 'false' }}
+        run: echo "Skip rebase due to there were no new commits."
+
+  check-secret:
+    runs-on: ubuntu-latest
+    needs: [sync-latest-from-upstream]
+    if: ${{ needs.sync-latest-from-upstream.outputs.successed == 'true' }}
+    outputs:
+      token-set: ${{ steps.check-key.outputs.defined }}
+      username-set: ${{ steps.check-username.outputs.defined }}
+      spaces-set: ${{ steps.check-spaces.outputs.defined }}
+    steps:
+      - id: check-key
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        if: "${{ env.HF_TOKEN != '' }}"
+        run: echo "defined=true" >> $GITHUB_OUTPUT
+
+      - id: check-username
+        env:
+          HF_USERNAME: ${{ secrets.HF_USERNAME }}
+        if: "${{ env.HF_USERNAME != '' }}"
+        run: echo "defined=true" >> $GITHUB_OUTPUT
+
+      - id: check-spaces
+        env:
+          HF_SPACES: ${{ secrets.HF_SPACES }}
+        if: "${{ env.HF_SPACES != '' }}"
+        run: echo "defined=true" >> $GITHUB_OUTPUT
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [check-secret]
+    if: ${{ needs.check-secret.outputs.token-set == 'true' && needs.check-secret.outputs.username-set == 'true' && needs.check-secret.outputs.spaces-set == 'true' }}
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_USERNAME: ${{ secrets.HF_USERNAME }}
+      HF_SPACES: ${{ secrets.HF_SPACES }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          ref: main
+
+      - name: Remove git history
+        run: rm -rf .git
+
+      - name: Prepend YAML front matter to README.md
+        run: |
+          echo "---" > temp_readme.md
+          echo "title: Open WebUI" >> temp_readme.md
+          echo "emoji: 🐳" >> temp_readme.md
+          echo "colorFrom: purple" >> temp_readme.md
+          echo "colorTo: gray" >> temp_readme.md
+          echo "sdk: docker" >> temp_readme.md
+          echo "app_port: 8080" >> temp_readme.md
+          echo "---" >> temp_readme.md
+          cat README.md >> temp_readme.md
+          mv temp_readme.md README.md
+
+      - name: Configure git
+        run: |
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+      - name: Set up Git and push to Space
+        run: |
+          git init --initial-branch=main
+          git lfs install
+          git lfs track "*.ttf"
+          git lfs track "*.jpg"
+          rm demo.gif
+          git add .
+          git commit -m "GitHub deploy: ${{ github.sha }}"
+          git push --force https://${HF_USERNAME}:${HF_TOKEN}@huggingface.co/spaces/${HF_USERNAME}/${HF_SPACES} main
